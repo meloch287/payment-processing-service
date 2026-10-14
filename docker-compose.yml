@@ -16,6 +16,14 @@ x-app: &app
     RABBITMQ_USER: ${RABBITMQ_USER:-payments}
     RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-payments}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+    DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+    OUTBOX_RELAY_ENABLED: ${OUTBOX_RELAY_ENABLED:-true}
+    OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-0.5}
+    OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+    OUTBOX_RETENTION_HOURS: ${OUTBOX_RETENTION_HOURS:-72}
+    OUTBOX_CLEANUP_INTERVAL: ${OUTBOX_CLEANUP_INTERVAL:-300}
+    PROCESSING_LEASE: ${PROCESSING_LEASE:-30}
     CONSUMER_PREFETCH: ${CONSUMER_PREFETCH:-16}
     MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
     RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-2}
@@ -65,7 +73,7 @@ services:
     <<: *app
     command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"]
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy

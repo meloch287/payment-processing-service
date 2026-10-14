@@ -1,8 +1,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-API=http://localhost:8000
-KEY=change-me
 BODY='{
   "amount": "1500.00",
   "currency": "RUB",
@@ -31,6 +29,9 @@ trap cleanup EXIT
 
 step "cp .env.example .env"
 cp .env.example .env
+set -a; . ./.env; set +a
+API="http://localhost:${API_PORT:-8000}"
+KEY="$API_KEY"
 
 step "docker compose up -d --build"
 docker compose up -d --build
@@ -100,7 +101,6 @@ for _ in $(seq 1 60); do
 done
 [ "$(json "d['webhook']['attempts']" <<<"$details")" = "3" ] || fail "expected 3 webhook attempts"
 [ "$(json "d['webhook']['delivered_at']" <<<"$details")" = "None" ] || fail "webhook must not be delivered"
-set -a; . ./.env; set +a
 for _ in $(seq 1 30); do
   dlq=$(curl -fsS -u "$RABBITMQ_USER:$RABBITMQ_PASSWORD" "http://localhost:15672/api/queues/%2F/payments.new.dlq" | json "d.get('messages', 0)")
   [ "$dlq" = "1" ] && break

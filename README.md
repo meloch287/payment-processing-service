@@ -202,6 +202,7 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
+| `API_PORT` | `8000` | Порт api на хосте в Docker Compose |
 | `API_KEY` | - (обязательна) | Статический ключ для `X-API-Key` |
 | `WEBHOOK_SECRET` | пусто | Секрет HMAC-подписи webhook |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5432` | Адрес PostgreSQL |
@@ -238,7 +239,7 @@ Docker Compose передаёт `POSTGRES_*` и `RABBITMQ_*` из `.env` и в �
 
 ```bash
 export DATABASE_URL=postgresql+asyncpg://payments:payments@localhost:5432/payments
-export RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+export RABBITMQ_URL=amqp://payments:payments@localhost:5672/
 bash scripts/verify.sh
 bash scripts/e2e-compose.sh
 bash scripts/quickstart-check.sh
@@ -276,7 +277,7 @@ docs/                 architecture.svg · sequence.svg · demo.gif · demo.mp4
 | [uv](https://docs.astral.sh/uv/) | 0.5+ | разработка и тесты, Python 3.12 ставится сам |
 | curl | любая | примеры запросов |
 
-Свободные порты: `8000` (api), `127.0.0.1:5432` (PostgreSQL), `127.0.0.1:5672` и `127.0.0.1:15672` (RabbitMQ).
+Свободные порты: `8000` (api, меняется через `API_PORT` в `.env`), `127.0.0.1:5432` (PostgreSQL), `127.0.0.1:5672` и `127.0.0.1:15672` (RabbitMQ).
 
 ### Весь стек в Docker
 
