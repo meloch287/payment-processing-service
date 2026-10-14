@@ -179,27 +179,6 @@ async def test_payments_are_processed_concurrently(
     assert elapsed < count * e2e_config.gateway_min_delay
 
 
-async def test_events_created_while_relay_is_down_are_published_later(
-    api: httpx.AsyncClient,
-    receiver: WebhookReceiver,
-    hook_url: Any,
-    e2e_config: E2EConfig,
-    stack: ServiceControl | None,
-) -> None:
-    if stack is None:
-        pytest.skip("requires service control: local processes or E2E_COMPOSE")
-    stack.stop("outbox-relay")
-    path, url = hook_url()
-    try:
-        payment_id = await create(api, url)
-        await asyncio.sleep(2)
-        assert receiver.received(path) == []
-        assert (await api.get(f"{URL}/{payment_id}")).json()["status"] == "pending"
-    finally:
-        stack.start("outbox-relay")
-    await wait_webhooks(receiver, path, 1, timeout(e2e_config))
-
-
 async def test_messages_survive_consumer_restart(
     api: httpx.AsyncClient,
     receiver: WebhookReceiver,
@@ -220,6 +199,33 @@ async def test_messages_survive_consumer_restart(
     await wait_webhooks(receiver, path, 1, timeout(e2e_config) + 10)
 
 
-async def test_api_requires_key(api: httpx.AsyncClient) -> None:
-    response = await api.get(f"{URL}/{uuid.uuid4()}", headers={"X-API-Key": "invalid"})
-    assert response.status_code == 401
+@pytest.mark.parametrize(
+    "path", ["/health/live", "/health/ready", "/docs", "/openapi.json", f"{URL}/{uuid.uuid4()}"]
+)
+async def test_every_endpoint_requires_key(api: httpx.AsyncClient, path: str) -> None:
+    assert (await api.get(path, headers={"X-API-Key": "invalid"})).status_code == 401
+    assert (await api.get(path)).status_code != 401
+
+
+async def test_payment_accepted_while_broker_is_down_is_delivered_after_recovery(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    hook_url: Any,
+    e2e_config: E2EConfig,
+    stack: ServiceControl | None,
+) -> None:
+    if stack is None or not stack.supports("rabbitmq"):
+        pytest.skip("requires control over RabbitMQ: E2E_COMPOSE or E2E_RABBITMQ_STOP/START")
+    stack.stop("rabbitmq")
+    path, url = hook_url()
+    try:
+        payment_id = await create(api, url)
+        await asyncio.sleep(3)
+        payment = (await api.get(f"{URL}/{payment_id}")).json()
+        assert payment["status"] == "pending"
+        assert receiver.received(path) == []
+    finally:
+        stack.start("rabbitmq")
+    await wait_webhooks(receiver, path, 1, timeout(e2e_config) + 60)
+    payment = await wait_payment(api, payment_id, lambda data: data["webhook"]["delivered_at"])
+    assert payment["status"] in {"succeeded", "failed"}

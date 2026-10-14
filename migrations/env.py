@@ -1,7 +1,7 @@
 import asyncio
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -9,6 +9,7 @@ from app.config import DatabaseSettings
 from app.models import Base
 
 target_metadata = Base.metadata
+MIGRATION_LOCK = 7_340_215_001
 
 
 def database_url() -> str:
@@ -29,6 +30,7 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
+        connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK})
         context.run_migrations()
 
 

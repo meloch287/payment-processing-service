@@ -28,6 +28,7 @@ def settings() -> Settings:
         webhook_secret=WEBHOOK_SECRET,
         database_url=database_url,
         rabbitmq_url=rabbitmq_url,
+        outbox_relay_enabled=False,
         _env_file=None,
     )
 

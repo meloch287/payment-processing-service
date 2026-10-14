@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -38,19 +37,25 @@ docker compose up -d --build
 
 step "waiting for /health/ready"
 for _ in $(seq 1 90); do
-  curl -fsS "$API/health/ready" >/dev/null 2>&1 && break
+  curl -fsS "$API/health/ready" -H "X-API-Key: $KEY" >/dev/null 2>&1 && break
   sleep 2
 done
-curl -fsS "$API/health/ready" | grep -q '"ok"' || fail "api is not ready"
+curl -fsS "$API/health/ready" -H "X-API-Key: $KEY" | grep -q '"ok"' || fail "api is not ready"
 
 step "docker compose ps"
 docker compose ps -a
-for service in postgres rabbitmq api outbox-relay consumer; do
+[ "$(docker compose ps -a --format '{{.Service}}' | sort | tr '\n' ' ')" = "api consumer postgres rabbitmq " ] \
+  || fail "expected exactly postgres, rabbitmq, api, consumer"
+for service in postgres rabbitmq api consumer; do
   state=$(docker compose ps -a --format '{{.Service}} {{.State}}' | awk -v s="$service" '$1 == s {print $2}')
   [ "$state" = "running" ] || fail "$service is $state"
 done
-[ "$(docker compose ps -a --format '{{.Service}} {{.ExitCode}}' | awk '$1 == "migrate" {print $2}')" = "0" ] \
-  || fail "migrate did not exit with 0"
+
+step "every endpoint requires X-API-Key"
+for path in /health/live /health/ready /docs /openapi.json /api/v1/payments/00000000-0000-0000-0000-000000000000; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$API$path")
+  [ "$code" = "401" ] || fail "$path without key returned $code"
+done
 
 step "POST /api/v1/payments without X-API-Key -> 401"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/payments" \
@@ -104,9 +109,9 @@ done
 [ "$dlq" = "1" ] || fail "expected 1 message in payments.new.dlq, got $dlq"
 
 step "docker compose restart keeps data"
-docker compose restart api outbox-relay consumer
+docker compose restart api consumer
 for _ in $(seq 1 60); do
-  curl -fsS "$API/health/ready" >/dev/null 2>&1 && break
+  curl -fsS "$API/health/ready" -H "X-API-Key: $KEY" >/dev/null 2>&1 && break
   sleep 2
 done
 after=$(curl -fsS "$API/api/v1/payments/$id" -H "X-API-Key: $KEY")

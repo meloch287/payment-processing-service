@@ -149,10 +149,17 @@ async def test_unknown_payment_returns_404(client: httpx.AsyncClient) -> None:
     assert response.status_code == 404
 
 
-async def test_health_endpoints_do_not_require_api_key(client: httpx.AsyncClient) -> None:
+@pytest.mark.parametrize("path", ["/health/live", "/health/ready", "/docs", "/openapi.json"])
+async def test_service_endpoints_require_api_key(client: httpx.AsyncClient, path: str) -> None:
+    assert (await client.get(path)).status_code == 200
     client.headers.pop("X-API-Key")
-    assert (await client.get("/health/live")).status_code == 200
-    assert (await client.get("/health/ready")).json() == {"status": "ok"}
+    assert (await client.get(path)).status_code == 401
+
+
+async def test_openapi_documents_api_key_scheme(client: httpx.AsyncClient) -> None:
+    schema = (await client.get("/openapi.json")).json()
+    assert schema["components"]["securitySchemes"]["APIKeyHeader"]["name"] == "X-API-Key"
+    assert "/api/v1/payments" in schema["paths"]
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,9 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Header, HTTPException, Response, status
 
-from app.api.deps import SessionDep, verify_api_key
+from app.api.deps import SessionDep
 from app.schemas import ErrorResponse, PaymentAccepted, PaymentCreate, PaymentRead
 from app.serializers import to_accepted, to_read
 from app.services import IdempotencyConflictError, create_payment, get_payment
@@ -11,8 +11,6 @@ from app.services import IdempotencyConflictError, create_payment, get_payment
 router = APIRouter(
     prefix="/api/v1/payments",
     tags=["payments"],
-    dependencies=[Depends(verify_api_key)],
-    responses={status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse}},
 )
 
 IdempotencyKey = Annotated[

@@ -9,13 +9,13 @@ down:
 	$(COMPOSE) down
 
 logs:
-	$(COMPOSE) logs -f api outbox-relay consumer
+	$(COMPOSE) logs -f api consumer
 
 ps:
 	$(COMPOSE) ps
 
 migrate:
-	$(COMPOSE) run --rm migrate
+	$(COMPOSE) exec api alembic upgrade head
 
 lint:
 	uv run ruff check .
@@ -32,10 +32,10 @@ test:
 	uv run pytest
 
 verify:
-	./scripts/verify.sh
+	bash scripts/verify.sh
 
 e2e-compose:
-	./scripts/e2e-compose.sh
+	bash scripts/e2e-compose.sh
 
 .env:
 	cp .env.example .env

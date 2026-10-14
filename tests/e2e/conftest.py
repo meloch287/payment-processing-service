@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -51,6 +52,8 @@ class E2EConfig:
 
 
 class ServiceControl(Protocol):
+    def supports(self, name: str) -> bool: ...
+
     def stop(self, name: str) -> None: ...
 
     def start(self, name: str) -> None: ...
@@ -59,6 +62,9 @@ class ServiceControl(Protocol):
 @dataclass
 class ComposeServices:
     command: list[str]
+
+    def supports(self, name: str) -> bool:
+        return True
 
     def _run(self, action: str, name: str) -> None:
         subprocess.run([*self.command, action, name], cwd=ROOT, check=True, timeout=120)
@@ -79,11 +85,16 @@ class ManagedProcesses:
 
     commands: ClassVar[dict[str, list[str]]] = {
         "api": ["-m", "uvicorn", "app.main:create_app", "--factory", "--host", "127.0.0.1"],
-        "outbox-relay": ["-m", "app.outbox"],
         "consumer": ["-m", "app.consumer"],
     }
 
+    def supports(self, name: str) -> bool:
+        return name in self.commands or bool(os.environ.get(f"E2E_{name.upper()}_STOP"))
+
     def start(self, name: str, *extra: str) -> None:
+        if name not in self.commands:
+            subprocess.run(shlex.split(os.environ[f"E2E_{name.upper()}_START"]), check=True)
+            return
         log = self.logs.get(name) or (self.log_dir / f"{name}.log").open("ab")
         self.logs[name] = log
         self.processes[name] = subprocess.Popen(
@@ -95,6 +106,9 @@ class ManagedProcesses:
         )
 
     def stop(self, name: str) -> None:
+        if name not in self.commands:
+            subprocess.run(shlex.split(os.environ[f"E2E_{name.upper()}_STOP"]), check=True)
+            return
         process = self.processes.pop(name)
         process.terminate()
         try:
@@ -116,11 +130,11 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_until_ready(url: str, timeout: float = 60) -> None:
+def wait_until_ready(url: str, api_key: str, timeout: float = 60) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            if httpx.get(url, timeout=2).status_code == 200:
+            if httpx.get(url, headers={"X-API-Key": api_key}, timeout=2).status_code == 200:
                 return
         except httpx.HTTPError:
             pass
@@ -191,10 +205,9 @@ def services(
     }
     managed = ManagedProcesses(env=env, log_dir=tmp_path_factory.mktemp("e2e-logs"))
     try:
-        managed.start("outbox-relay")
         managed.start("consumer")
         managed.start("api", "--port", port)
-        wait_until_ready(f"{e2e_config.base_url}/health/ready")
+        wait_until_ready(f"{e2e_config.base_url}/health/ready", e2e_config.api_key)
         yield managed
     finally:
         managed.stop_all()

@@ -18,11 +18,30 @@
 
 | Сервис | Команда | Роль |
 |---|---|---|
-| `api` | `uvicorn app.main:create_app --factory` | REST API, валидация, идемпотентность, запись платежа и события в одной транзакции |
-| `outbox-relay` | `python -m app.outbox` | Публикует события из `outbox` в RabbitMQ, помечает `published_at`, чистит старые записи |
+| `api` | `alembic upgrade head && uvicorn app.main:create_app --factory` | Миграции при старте (под advisory lock), REST API, идемпотентность, запись платежа и события в одной транзакции. Фоновая задача outbox relay публикует события в RabbitMQ и чистит старые записи |
 | `consumer` | `python -m app.consumer` | Один обработчик: шлюз → статус в БД → webhook → retry / DLQ |
-| `migrate` | `alembic upgrade head` | One-shot миграции перед стартом приложений |
-| `postgres`, `rabbitmq` | - | Хранилище и брокер (management UI на `:15672`) |
+| `postgres` | - | Хранилище |
+| `rabbitmq` | - | Брокер, management UI на `:15672` |
+
+Ровно четыре сервиса, как в ТЗ. Relay можно вынести в отдельный процесс (`python -m app.outbox`, `OUTBOX_RELAY_ENABLED=false` в api) без изменений кода.
+
+## Показ
+
+<p align="center"><a href="docs/demo.mp4"><img src="docs/demo.gif" alt="Демонстрация работы сервиса" width="100%"></a></p>
+
+<p align="center"><a href="docs/demo.mp4"><b>▶ demo.mp4</b></a> · запись терминала</p>
+
+| Шаг | Что видно |
+|---|---|
+| 1 | `alembic upgrade head`, запуск `api` (с outbox relay) и `consumer` |
+| 2 | `POST` → `202 pending` → relay публикует → шлюз 2-5 с → `succeeded` или `failed` (90/10), webhook с валидной HMAC-подписью |
+| 3 | Повтор с тем же `Idempotency-Key` → тот же платёж, другое тело → `409`; `/health/ready`, `/docs`, `/openapi.json`, `/api/v1/*` без ключа → `401` |
+| 4 | Webhook `503` → `503` → `200`, повторы через `retry.2000ms` и `retry.4000ms` |
+| 5 | Webhook `500` × 3 → `payments.new.dlq` |
+| 6 | RabbitMQ остановлен → API принимает платёж, событие ждёт в `outbox` → брокер поднят → платёж обработан |
+| 7 | `pytest`: unit + integration |
+
+Слева команды, справа логи outbox relay и consumer и приёмник webhook.
 
 ## Жизненный цикл платежа
 
@@ -65,18 +84,18 @@ docker compose ps
 
 | Адрес | Что |
 |---|---|
-| http://localhost:8000/docs | Swagger UI |
-| http://localhost:8000/health/ready | Readiness (проверка БД) |
+| http://localhost:8000/docs | Swagger UI (с заголовком `X-API-Key`) |
+| http://localhost:8000/health/ready | Readiness: проверка БД (с заголовком `X-API-Key`) |
 | http://localhost:15672 | RabbitMQ management (`RABBITMQ_USER` / `RABBITMQ_PASSWORD`) |
 
 ```bash
-docker compose logs -f api outbox-relay consumer
+docker compose logs -f api consumer
 docker compose down -v
 ```
 
 ## API
 
-Все эндпоинты `/api/v1/*` требуют заголовок `X-API-Key`. `/health/*` открыты для оркестратора.
+Все эндпоинты без исключения требуют заголовок `X-API-Key`: `/api/v1/*`, `/health/*`, `/docs`, `/openapi.json`. Без ключа или с неверным ключом - `401`. Healthcheck в compose передаёт ключ из `API_KEY`.
 
 ### Создание платежа
 
@@ -185,9 +204,13 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 |---|---|---|
 | `API_KEY` | - (обязательна) | Статический ключ для `X-API-Key` |
 | `WEBHOOK_SECRET` | пусто | Секрет HMAC-подписи webhook |
-| `DATABASE_URL` | `postgresql+asyncpg://payments:payments@localhost:5432/payments` | DSN PostgreSQL |
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672/` | DSN RabbitMQ |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5432` | Адрес PostgreSQL |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `payments` / `payments` / `payments` | Учётные данные и база. Спецсимволы в пароле допустимы, DSN собирается с URL-кодированием |
+| `RABBITMQ_HOST` / `RABBITMQ_PORT` / `RABBITMQ_VHOST` | `localhost` / `5672` / `/` | Адрес RabbitMQ |
+| `RABBITMQ_USER` / `RABBITMQ_PASSWORD` | `guest` / `guest` | Учётные данные RabbitMQ, кодируются так же |
+| `DATABASE_URL` / `RABBITMQ_URL` | собираются из переменных выше | Готовый DSN целиком, если задан, имеет приоритет |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `10` / `10` | Пул соединений SQLAlchemy |
+| `OUTBOX_RELAY_ENABLED` | `true` | Запускать outbox relay внутри api |
 | `OUTBOX_POLL_INTERVAL` | `0.5` | Пауза relay между пустыми выборками, с |
 | `OUTBOX_BATCH_SIZE` | `100` | Событий за одну итерацию relay |
 | `PUBLISH_TIMEOUT` | `10` | Таймаут публикации в RabbitMQ с подтверждением, с |
@@ -202,7 +225,7 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 | `WEBHOOK_TIMEOUT` | `5` | Общий дедлайн HTTP-запроса webhook, с |
 | `LOG_LEVEL` | `INFO` | Уровень логирования |
 
-Docker Compose дополнительно читает `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`.
+Docker Compose передаёт `POSTGRES_*` и `RABBITMQ_*` из `.env` и в контейнеры БД и брокера, и в приложение. CI прогоняет e2e с паролями вида `p@ss:w/rd+=#1`.
 
 ## Тесты
 
@@ -210,19 +233,19 @@ Docker Compose дополнительно читает `POSTGRES_USER`, `POSTGRE
 |---|---|---|---|
 | Unit | `tests/unit` | Валидация и fingerprint, топология и задержки, эмулятор шлюза (границы задержки, 90/10), подпись и ошибки webhook, маршрутизация retry / DLQ / requeue | - |
 | Integration | `tests/integration` | API на живой БД: 202 / 401 / 404 / 409 / 422 (включая NaN и NUL, которые не принимает PostgreSQL), 20 параллельных запросов с одним ключом → 1 платёж и 1 событие, outbox relay с RabbitMQ, retention, процессор: успех, отказ, повторная доставка, гонка двух consumer без двойного списания и двойного webhook, перехват истёкшего lease | PostgreSQL, RabbitMQ |
-| E2E | `tests/e2e` | Реальные процессы `api` + `outbox-relay` + `consumer` и HTTP-приёмник webhook: подпись, дедупликация, retry 503 → 503 → 200 с проверкой интервалов, DLQ после 3 × 500, параллельная обработка, остановка relay и рестарт consumer без потерь | PostgreSQL, RabbitMQ или поднятый `docker compose` |
-| Quickstart | `scripts/quickstart-check.sh` | Шаги раздела «Быстрый старт» дословно на чистой машине: `cp .env.example .env` → `docker compose up -d --build` → все контейнеры `running`, `migrate` завершился с 0 → примеры curl из README: 401, 202, replay, 409, обработка, 3 неудачных webhook → DLQ → рестарт без потери данных | Docker |
+| E2E | `tests/e2e` | Реальные процессы `api` (с outbox relay) + `consumer` и HTTP-приёмник webhook: подпись, дедупликация, retry 503 → 503 → 200 с проверкой интервалов, DLQ после 3 × 500, параллельная обработка, рестарт consumer и остановка RabbitMQ без потерь, `401` на каждом эндпоинте | PostgreSQL, RabbitMQ или поднятый `docker compose` |
+| Quickstart | `scripts/quickstart-check.sh` | Шаги раздела «Быстрый старт» дословно на чистой машине: `cp .env.example .env` → `docker compose up -d --build` → ровно 4 контейнера `running` → `401` без ключа на каждом эндпоинте → примеры curl из README: 202, replay, 409, обработка, 3 неудачных webhook → DLQ → рестарт без потери данных | Docker |
 
 ```bash
 export DATABASE_URL=postgresql+asyncpg://payments:payments@localhost:5432/payments
 export RABBITMQ_URL=amqp://guest:guest@localhost:5672/
-./scripts/verify.sh
-./scripts/e2e-compose.sh
-./scripts/quickstart-check.sh
+bash scripts/verify.sh
+bash scripts/e2e-compose.sh
+bash scripts/quickstart-check.sh
 ```
 
 `verify.sh`: `ruff check` → `ruff format --check` → `mypy --strict` → `alembic upgrade head` → `alembic check` → `pytest`.
-`e2e-compose.sh` собирает образы, поднимает стек и прогоняет `tests/e2e` против контейнеров; остановка relay и рестарт consumer выполняются через `docker compose stop/start`.
+`e2e-compose.sh` собирает образы, поднимает стек и прогоняет `tests/e2e` против контейнеров; рестарт consumer и остановка RabbitMQ выполняются через `docker compose stop/start`.
 CI (GitHub Actions) на чистом раннере: lint и типы → тесты с service-контейнерами → e2e против `docker compose` → проверка Quickstart из README.
 
 ## Структура
@@ -231,7 +254,7 @@ CI (GitHub Actions) на чистом раннере: lint и типы → те�
 app/
 ├── api/              payments.py · health.py · deps.py (X-API-Key, сессия)
 ├── consumer/         __main__.py · handler.py (retry/DLQ) · processor.py · gateway.py · webhook.py
-├── outbox/           __main__.py · relay.py
+├── outbox/           relay.py · runner.py (фоновая задача api) · __main__.py (отдельный процесс)
 ├── config.py         pydantic-settings
 ├── messaging.py      топология RabbitMQ, брокер
 ├── models.py         Payment, OutboxEvent
@@ -240,5 +263,5 @@ app/
 migrations/           Alembic (async)
 tests/                unit · integration · e2e
 scripts/              verify.sh · e2e-compose.sh · quickstart-check.sh
-docs/                 architecture.svg · sequence.svg
+docs/                 architecture.svg · sequence.svg · demo.gif · demo.mp4
 ```

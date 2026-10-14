@@ -67,11 +67,15 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      - run: ./scripts/e2e-compose.sh
+      - name: Credentials with URL-reserved characters
+        run: |
+          cp .env.example .env
+          sed -i 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=p@ss:w/rd+=#1|; s|^RABBITMQ_PASSWORD=.*|RABBITMQ_PASSWORD=r@bbit:p/w+=#1|' .env
+      - run: bash scripts/e2e-compose.sh
 
   quickstart:
     name: README quickstart
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: ./scripts/quickstart-check.sh
+      - run: bash scripts/quickstart-check.sh
