@@ -51,7 +51,7 @@
 
 | Требование | Реализация |
 |---|---|
-| Гарантированная публикация | **Transactional outbox**: платёж и событие пишутся одной транзакцией. Relay публикует с publisher confirms, `persistent`, `mandatory`, с таймаутом `PUBLISH_TIMEOUT` и ставит `published_at` отдельной транзакцией на каждое событие сразу после подтверждения. Брокер недоступен - события копятся в `outbox`, API продолжает работать |
+| Гарантированная публикация | **Transactional outbox**: платёж и событие пишутся одной транзакцией. Relay берёт пачку до `OUTBOX_BATCH_SIZE` событий, публикует их параллельно с publisher confirms, `persistent`, `mandatory` и таймаутом `PUBLISH_TIMEOUT`, затем одним запросом ставит `published_at` подтверждённым. API будит relay сразу после коммита платежа, опрос раз в `OUTBOX_POLL_INTERVAL` остаётся запасным путём. Брокер недоступен - события копятся в `outbox`, API продолжает работать |
 | Масштабирование relay | `FOR UPDATE SKIP LOCKED` - несколько экземпляров не берут одну и ту же запись |
 | Идемпотентность API | `UNIQUE (idempotency_key)` + `INSERT … ON CONFLICT DO NOTHING`. Тело запроса хешируется (SHA-256 канонического JSON): тот же ключ и то же тело → `202` с исходным ответом и `Idempotent-Replayed: true`, другое тело → `409`. Гонка параллельных запросов разрешается на уровне PostgreSQL |
 | Идемпотентность consumer | Перед вызовом шлюза платёж захватывается lease-арендой (`processing_lease_until`, условный `UPDATE … RETURNING`). Параллельная копия сообщения не вызывает шлюз, а откладывается в retry-очередь без расхода попытки. Lease истёк (consumer упал) - платёж подхватывает следующая доставка. Статус меняется только из `pending`, доставленный webhook повторно не шлётся. `payment_id` уходит в шлюз как ключ идемпотентности |
@@ -212,12 +212,12 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 | `DATABASE_URL` / `RABBITMQ_URL` | собираются из переменных выше | Готовый DSN целиком, если задан, имеет приоритет |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `10` / `10` | Пул соединений SQLAlchemy |
 | `OUTBOX_RELAY_ENABLED` | `true` | Запускать outbox relay внутри api |
-| `OUTBOX_POLL_INTERVAL` | `0.5` | Пауза relay между пустыми выборками, с |
-| `OUTBOX_BATCH_SIZE` | `100` | Событий за одну итерацию relay |
+| `OUTBOX_POLL_INTERVAL` | `1` | Запасной опрос outbox, если relay не разбудили, с |
+| `OUTBOX_BATCH_SIZE` | `100` | Событий в пачке relay, публикуются параллельно |
 | `PUBLISH_TIMEOUT` | `10` | Таймаут публикации в RabbitMQ с подтверждением, с |
 | `OUTBOX_RETENTION_HOURS` | `72` | Через сколько удалять опубликованные события |
-| `OUTBOX_CLEANUP_INTERVAL` | `300` | Период очистки outbox, с |
-| `CONSUMER_PREFETCH` | `16` | Сообщений в обработке одновременно на consumer (QoS канала) |
+| `OUTBOX_CLEANUP_INTERVAL` | `300` | Период очистки outbox, с. Удаление порциями по 1000 строк по индексу `published_at` |
+| `CONSUMER_PREFETCH` | `128` | Сообщений в обработке одновременно на consumer (QoS канала). Обработка ждёт шлюз, а не CPU, поэтому значение высокое |
 | `PROCESSING_LEASE` | `30` | Аренда платежа на время вызова шлюза, с |
 | `MAX_ATTEMPTS` | `3` | Попыток до DLQ, минимум 2 |
 | `RETRY_BASE_DELAY` | `2` | База экспоненты, с: `2, 4, …` |
@@ -225,6 +225,7 @@ def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
 | `GATEWAY_SUCCESS_RATE` | `0.9` | Доля успешных платежей |
 | `WEBHOOK_TIMEOUT` | `5` | Общий дедлайн HTTP-запроса webhook, с |
 | `LOG_LEVEL` | `INFO` | Уровень логирования |
+| `WEB_CONCURRENCY` | `1` | Воркеров uvicorn в api, у каждого свой relay |
 
 Docker Compose передаёт `POSTGRES_*` и `RABBITMQ_*` из `.env` и в контейнеры БД и брокера, и в приложение. CI прогоняет e2e с паролями вида `p@ss:w/rd+=#1`.
 
@@ -249,6 +250,24 @@ bash scripts/quickstart-check.sh
 `e2e-compose.sh` собирает образы, поднимает стек и прогоняет `tests/e2e` против контейнеров; рестарт consumer и остановка RabbitMQ выполняются через `docker compose stop/start`.
 CI (GitHub Actions) на чистом раннере: lint и типы → тесты с service-контейнерами → e2e против `docker compose` → проверка Quickstart из README.
 
+### Нагрузочный тест
+
+`scripts/bench.py` гоняет запущенный стек и меряет три вещи: скорость relay на 5000 событий в outbox, полный путь 300 платежей от `POST` до webhook и пропускную способность `POST /api/v1/payments`.
+
+```bash
+uv run python -m scripts.bench --base-url http://localhost:8000 --api-key change-me \
+  --database-url postgresql+asyncpg://payments:payments@localhost:5432/payments
+```
+
+Результат на одной машине (2 vCPU, PostgreSQL 18, RabbitMQ 4.0, шлюз 2-5 с), среднее двух прогонов:
+
+| Метрика | Пачки, параллельная публикация, prefetch 128 | Одно событие за транзакцию, prefetch 16 |
+|---|---|---|
+| Outbox relay, событий/с | **~2075** | ~151 |
+| Платежей/с от `POST` до webhook | **~10.0** | ~3.4 |
+| p95 от `POST` до webhook, с | **~26** | ~87 |
+| `POST /api/v1/payments`, запросов/с | ~269 | ~266 |
+
 ## Структура
 
 ```text
@@ -263,7 +282,7 @@ app/
 └── services.py       создание платежа: идемпотентность + outbox
 migrations/           Alembic (async)
 tests/                unit · integration · e2e
-scripts/              verify.sh · e2e-compose.sh · quickstart-check.sh
+scripts/              verify.sh · e2e-compose.sh · quickstart-check.sh · bench.py
 docs/                 architecture.svg · sequence.svg · demo.gif · demo.mp4
 ```
 

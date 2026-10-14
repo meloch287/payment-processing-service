@@ -89,6 +89,11 @@ class OutboxEvent(Base):
             "created_at",
             postgresql_where=text("published_at IS NULL"),
         ),
+        Index(
+            "ix_outbox_published_at",
+            "published_at",
+            postgresql_where=text("published_at IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

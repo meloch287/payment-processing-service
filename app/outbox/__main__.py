@@ -12,7 +12,8 @@ async def main() -> None:
     configure_logging(settings.log_level)
     engine = create_engine(settings)
     try:
-        async with running_relay(settings, create_session_factory(engine)) as stop:
+        async with running_relay(settings, create_session_factory(engine)):
+            stop = asyncio.Event()
             install_stop_signals(stop)
             await stop.wait()
     finally:

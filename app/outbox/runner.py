@@ -13,7 +13,7 @@ from app.outbox.relay import OutboxRelay, RabbitEventPublisher
 @asynccontextmanager
 async def running_relay(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession]
-) -> AsyncIterator[asyncio.Event]:
+) -> AsyncIterator[OutboxRelay]:
     broker = create_broker(settings)
     topology = topology_from_settings(settings)
     stop = asyncio.Event()
@@ -30,9 +30,10 @@ async def running_relay(
         )
         task = asyncio.create_task(relay.run(stop))
         try:
-            yield stop
+            yield relay
         finally:
             stop.set()
+            relay.wake()
             await task
     finally:
         await broker.stop()

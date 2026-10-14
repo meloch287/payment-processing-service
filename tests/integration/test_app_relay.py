@@ -15,10 +15,12 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.usefixtures("migrated", "clean_db")
-async def test_api_process_runs_outbox_relay(
+async def test_api_wakes_relay_right_after_commit(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    app = create_app(settings.model_copy(update={"outbox_relay_enabled": True}))
+    app = create_app(
+        settings.model_copy(update={"outbox_relay_enabled": True, "outbox_poll_interval": 30})
+    )
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(
@@ -39,7 +41,7 @@ async def test_api_process_runs_outbox_relay(
         )
         assert response.status_code == 202
         published = None
-        for _ in range(50):
+        for _ in range(30):
             async with session_factory() as session:
                 published = await session.scalar(select(OutboxEvent.published_at))
             if published is not None:

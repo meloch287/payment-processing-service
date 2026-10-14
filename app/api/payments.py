@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
 from app.api.deps import SessionDep
 from app.schemas import ErrorResponse, PaymentAccepted, PaymentCreate, PaymentRead
@@ -28,6 +28,7 @@ async def create(
     body: PaymentCreate,
     idempotency_key: IdempotencyKey,
     session: SessionDep,
+    request: Request,
     response: Response,
 ) -> PaymentAccepted:
     try:
@@ -38,7 +39,9 @@ async def create(
             detail="Idempotency-Key was already used with a different request body",
         ) from exc
     response.headers["Location"] = f"{router.prefix}/{result.payment.id}"
-    if not result.created:
+    if result.created:
+        request.app.state.wake_outbox_relay()
+    else:
         response.headers["Idempotent-Replayed"] = "true"
     return to_accepted(result.payment)
 

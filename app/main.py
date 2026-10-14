@@ -39,10 +39,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_factory = create_session_factory(engine)
         app.state.settings = settings
         app.state.session_factory = session_factory
+        app.state.wake_outbox_relay = lambda: None
         async with AsyncExitStack() as stack:
             stack.push_async_callback(engine.dispose)
             if settings.outbox_relay_enabled:
-                await stack.enter_async_context(running_relay(settings, session_factory))
+                relay = await stack.enter_async_context(running_relay(settings, session_factory))
+                app.state.wake_outbox_relay = relay.wake
             yield
 
     app = FastAPI(

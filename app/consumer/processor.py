@@ -31,15 +31,15 @@ class PaymentProcessor:
         self._lease = timedelta(seconds=lease_seconds)
 
     async def process(self, payment_id: uuid.UUID) -> Payment:
-        payment = await self._settle(payment_id)
+        payment, webhook_claimed = await self._settle(payment_id)
         if payment.webhook_delivered_at is None:
-            payment = await self._notify(payment)
+            payment = await self._notify(payment, webhook_claimed)
         return payment
 
-    async def _settle(self, payment_id: uuid.UUID) -> Payment:
+    async def _settle(self, payment_id: uuid.UUID) -> tuple[Payment, bool]:
         payment = await self._claim(payment_id)
         if payment.status is not PaymentStatus.PENDING:
-            return payment
+            return payment, False
         result = await self._gateway.charge(
             ChargeRequest(payment_id=payment.id, amount=payment.amount, currency=payment.currency)
         )
@@ -53,14 +53,15 @@ class PaymentProcessor:
                         failure_reason=result.failure_reason,
                         processed_at=func.now(),
                         processing_lease_until=None,
+                        webhook_lease_until=func.now() + self._lease,
                     )
                     .returning(Payment)
                     .execution_options(populate_existing=True)
                 )
             ).one_or_none()
             if settled is None:
-                settled = await self._load(session, payment_id)
-        return settled
+                return await self._load(session, payment_id), False
+        return settled, True
 
     async def _claim(self, payment_id: uuid.UUID) -> Payment:
         async with self._session_factory() as session, session.begin():
@@ -100,8 +101,8 @@ class PaymentProcessor:
             raise PaymentNotFoundError(str(payment_id))
         return payment
 
-    async def _notify(self, payment: Payment) -> Payment:
-        claimed = await self._claim_webhook(payment.id)
+    async def _notify(self, payment: Payment, claimed_already: bool) -> Payment:
+        claimed = payment if claimed_already else await self._claim_webhook(payment.id)
         if claimed is None:
             async with self._session_factory() as session:
                 current = await self._load(session, payment.id)

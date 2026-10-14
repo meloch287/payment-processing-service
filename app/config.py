@@ -44,12 +44,12 @@ class Settings(DatabaseSettings):
     log_level: str = "INFO"
 
     outbox_relay_enabled: bool = True
-    outbox_poll_interval: float = Field(default=0.5, gt=0)
+    outbox_poll_interval: float = Field(default=1.0, gt=0)
     outbox_batch_size: int = Field(default=100, ge=1)
     outbox_retention_hours: float = Field(default=72, gt=0)
     outbox_cleanup_interval: float = Field(default=300, gt=0)
 
-    consumer_prefetch: int = Field(default=16, ge=1)
+    consumer_prefetch: int = Field(default=128, ge=1)
     max_attempts: int = Field(default=3, ge=2)
     publish_timeout: float = Field(default=10.0, gt=0)
     processing_lease: float = Field(default=30.0, gt=0)

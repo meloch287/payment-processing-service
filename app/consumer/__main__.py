@@ -25,7 +25,12 @@ async def main() -> None:
     stop = asyncio.Event()
     install_stop_signals(stop)
     async with httpx.AsyncClient(
-        timeout=settings.webhook_timeout, follow_redirects=False
+        timeout=settings.webhook_timeout,
+        follow_redirects=False,
+        limits=httpx.Limits(
+            max_connections=settings.consumer_prefetch,
+            max_keepalive_connections=settings.consumer_prefetch,
+        ),
     ) as client:
         handler = PaymentMessageHandler(
             processor=PaymentProcessor(

@@ -117,11 +117,67 @@ async def test_failed_publish_keeps_event_pending(
 
     assert await relay.relay_batch() == 0
 
-    stored = sorted(await load(session_factory), key=lambda event: event.attempts, reverse=True)
-    assert stored[0].published_at is None
-    assert stored[0].attempts == 1
-    assert "broker unavailable" in (stored[0].last_error or "")
-    assert stored[1].attempts == 0
+    stored = await load(session_factory)
+    assert len(stored) == 2
+    for event in stored:
+        assert event.published_at is None
+        assert event.attempts == 1
+        assert "broker unavailable" in (event.last_error or "")
+
+
+class FlakyPublisher:
+    def __init__(self, inner: RabbitEventPublisher, fail_ids: set[uuid.UUID]) -> None:
+        self.inner = inner
+        self.fail_ids = fail_ids
+
+    async def publish(self, event: OutboxEvent) -> None:
+        if event.aggregate_id in self.fail_ids:
+            raise ConnectionError("broker unavailable")
+        await self.inner.publish(event)
+
+
+async def test_partial_failure_publishes_the_rest(
+    session_factory: async_sessionmaker[AsyncSession],
+    broker: RabbitBroker,
+    topology: Topology,
+) -> None:
+    events = await add_events(session_factory, 4)
+    failing = {events[1].payment_id}
+    relay = OutboxRelay(
+        session_factory,
+        FlakyPublisher(RabbitEventPublisher(broker, topology), failing),
+        batch_size=10,
+        poll_interval=0.1,
+    )
+
+    assert await relay.relay_batch() == 3
+
+    stored = {event.aggregate_id: event for event in await load(session_factory)}
+    assert stored[events[1].payment_id].published_at is None
+    assert all(
+        stored[event.payment_id].published_at is not None
+        for event in events
+        if event.payment_id not in failing
+    )
+
+
+async def test_purge_deletes_in_batches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await add_events(session_factory, 5)
+    async with session_factory() as session, session.begin():
+        for event in (await session.scalars(select(OutboxEvent))).all():
+            event.published_at = datetime.now(UTC) - timedelta(hours=100)
+    relay = OutboxRelay(
+        session_factory,
+        FailingPublisher(),
+        batch_size=10,
+        poll_interval=0.1,
+        purge_batch_size=2,
+    )
+
+    assert await relay.purge_published() == 5
+    assert await load(session_factory) == []
 
 
 async def test_published_events_are_purged_after_retention(

@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 
 from faststream.rabbit import Channel, ExchangeType, RabbitBroker, RabbitExchange, RabbitQueue
@@ -80,6 +81,7 @@ def create_broker(settings: Settings, prefetch_count: int | None = None) -> Rabb
             prefetch_count=prefetch_count, publisher_confirms=True, on_return_raises=True
         ),
         graceful_timeout=30.0,
+        log_level=logging.DEBUG,
     )
 
 

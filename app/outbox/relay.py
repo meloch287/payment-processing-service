@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from faststream.rabbit import RabbitBroker
-from sqlalchemy import CursorResult, delete, select
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.messaging import ATTEMPT_HEADER, Topology
@@ -49,6 +49,7 @@ class OutboxRelay:
         poll_interval: float,
         retention: timedelta = timedelta(hours=72),
         cleanup_interval: float = 300,
+        purge_batch_size: int = 1000,
     ) -> None:
         self._session_factory = session_factory
         self._publisher = publisher
@@ -56,38 +57,68 @@ class OutboxRelay:
         self._poll_interval = poll_interval
         self._retention = retention
         self._cleanup_interval = cleanup_interval
+        self._purge_batch_size = purge_batch_size
+        self._wakeup = asyncio.Event()
+
+    def wake(self) -> None:
+        self._wakeup.set()
 
     async def relay_batch(self) -> int:
-        published = 0
-        while published < self._batch_size:
-            async with self._session_factory() as session, session.begin():
-                event = await session.scalar(
+        async with self._session_factory() as session, session.begin():
+            events = (
+                await session.scalars(
                     select(OutboxEvent)
                     .where(OutboxEvent.published_at.is_(None))
                     .order_by(OutboxEvent.created_at)
-                    .limit(1)
+                    .limit(self._batch_size)
                     .with_for_update(skip_locked=True)
                 )
-                if event is None:
-                    return published
+            ).all()
+            if not events:
+                return 0
+            results = await asyncio.gather(
+                *(self._publisher.publish(event) for event in events), return_exceptions=True
+            )
+            outcomes = list(zip(events, results, strict=True))
+            published = [event.id for event, result in outcomes if result is None]
+            if published:
+                await session.execute(
+                    update(OutboxEvent)
+                    .where(OutboxEvent.id.in_(published))
+                    .values(published_at=func.now(), attempts=OutboxEvent.attempts + 1)
+                    .execution_options(synchronize_session=False)
+                )
+            failures = [
+                (event, result) for event, result in outcomes if isinstance(result, BaseException)
+            ]
+            for event, error in failures:
                 event.attempts += 1
-                try:
-                    await self._publisher.publish(event)
-                except Exception as exc:
-                    event.last_error = repr(exc)[:2000]
-                    logger.warning("outbox publish failed event_id=%s: %r", event.id, exc)
-                    return published
-                event.published_at = datetime.now(UTC)
-            published += 1
-        return published
+                event.last_error = repr(error)[:2000]
+            if failures:
+                logger.warning(
+                    "outbox publish failed for %d event(s): %r", len(failures), failures[0][1]
+                )
+        return len(published)
 
     async def purge_published(self) -> int:
         cutoff = datetime.now(UTC) - self._retention
-        async with self._session_factory() as session, session.begin():
-            result = await session.execute(
-                delete(OutboxEvent).where(OutboxEvent.published_at < cutoff)
-            )
-        return result.rowcount if isinstance(result, CursorResult) else 0
+        total = 0
+        while True:
+            async with self._session_factory() as session, session.begin():
+                expired = (
+                    select(OutboxEvent.id)
+                    .where(OutboxEvent.published_at < cutoff)
+                    .limit(self._purge_batch_size)
+                )
+                result = await session.execute(
+                    delete(OutboxEvent)
+                    .where(OutboxEvent.id.in_(expired))
+                    .execution_options(synchronize_session=False)
+                )
+            deleted = result.rowcount if isinstance(result, CursorResult) else 0
+            total += deleted
+            if deleted < self._purge_batch_size:
+                return total
 
     async def run(self, stop: asyncio.Event) -> None:
         logger.info("outbox relay started")
@@ -109,7 +140,8 @@ class OutboxRelay:
                 published = 0
             if published:
                 logger.info("outbox published %d event(s)", published)
-            if published < self._batch_size:
+            if published < self._batch_size and not stop.is_set():
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=self._poll_interval)
+                    await asyncio.wait_for(self._wakeup.wait(), timeout=self._poll_interval)
+                self._wakeup.clear()
         logger.info("outbox relay stopped")
