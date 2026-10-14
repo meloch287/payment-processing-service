@@ -1,0 +1,96 @@
+name: payments
+
+x-app: &app
+  build: .
+  image: payment-processing-service:latest
+  init: true
+  restart: unless-stopped
+  environment: &app-env
+    API_KEY: ${API_KEY:?set API_KEY in .env}
+    WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:-payments}@postgres:5432/${POSTGRES_DB:-payments}
+    RABBITMQ_URL: amqp://${RABBITMQ_USER:-payments}:${RABBITMQ_PASSWORD:-payments}@rabbitmq:5672/
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    CONSUMER_PREFETCH: ${CONSUMER_PREFETCH:-16}
+    MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+    RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-2}
+    GATEWAY_MIN_DELAY: ${GATEWAY_MIN_DELAY:-2}
+    GATEWAY_MAX_DELAY: ${GATEWAY_MAX_DELAY:-5}
+    GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+    WEBHOOK_TIMEOUT: ${WEBHOOK_TIMEOUT:-5}
+    PUBLISH_TIMEOUT: ${PUBLISH_TIMEOUT:-10}
+  depends_on: &app-deps
+    migrate:
+      condition: service_completed_successfully
+    rabbitmq:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payments}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      start_period: 10s
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-payments}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-payments}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  outbox-relay:
+    <<: *app
+    command: ["python", "-m", "app.outbox"]
+    stop_grace_period: 20s
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "app.consumer"]
+    stop_grace_period: 40s
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
