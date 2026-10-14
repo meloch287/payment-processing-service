@@ -265,3 +265,80 @@ tests/                unit · integration · e2e
 scripts/              verify.sh · e2e-compose.sh · quickstart-check.sh
 docs/                 architecture.svg · sequence.svg · demo.gif · demo.mp4
 ```
+
+## Запуск
+
+### Требования
+
+| Инструмент | Версия | Для чего |
+|---|---|---|
+| Docker + Compose v2 | 24+ | весь стек или только PostgreSQL и RabbitMQ |
+| [uv](https://docs.astral.sh/uv/) | 0.5+ | разработка и тесты, Python 3.12 ставится сам |
+| curl | любая | примеры запросов |
+
+Свободные порты: `8000` (api), `127.0.0.1:5432` (PostgreSQL), `127.0.0.1:5672` и `127.0.0.1:15672` (RabbitMQ).
+
+### Весь стек в Docker
+
+```bash
+git clone https://github.com/meloch287/payment-processing-service.git
+cd payment-processing-service
+cp .env.example .env
+docker compose up -d --build
+docker compose ps
+curl -s http://localhost:8000/health/ready -H "X-API-Key: change-me"
+```
+
+Ожидаемо: 4 контейнера `postgres`, `rabbitmq`, `api (healthy)`, `consumer` и ответ `{"status":"ok"}`. Миграции применяются при старте `api`.
+
+Первый платёж:
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/payments \
+  -H "X-API-Key: change-me" \
+  -H "Idempotency-Key: demo-1" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "100.00", "currency": "RUB", "description": "demo", "webhook_url": "https://httpbin.org/post"}'
+
+curl -s http://localhost:8000/api/v1/payments/<payment_id> -H "X-API-Key: change-me"
+```
+
+Через 2-5 секунд `status` станет `succeeded` или `failed`, а `webhook.delivered_at` заполнится.
+
+| Действие | Команда |
+|---|---|
+| Логи | `docker compose logs -f api consumer` |
+| Обновление | `git pull && docker compose up -d --build` |
+| Миграции вручную | `docker compose exec api alembic upgrade head` |
+| Остановка | `docker compose down` |
+| Остановка с удалением данных | `docker compose down -v` |
+
+Перед запуском вне локальной машины замените в `.env` значения `API_KEY`, `WEBHOOK_SECRET`, `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD`.
+
+### Разработка: приложение локально, PostgreSQL и RabbitMQ в Docker
+
+```bash
+cp .env.example .env
+docker compose up -d postgres rabbitmq
+uv sync
+uv run alembic upgrade head
+uv run uvicorn app.main:create_app --factory --reload
+```
+
+Consumer во втором терминале:
+
+```bash
+uv run python -m app.consumer
+```
+
+Настройки читаются из `.env`: хосты по умолчанию `localhost`, учётные данные совпадают с контейнерами.
+
+### Тесты
+
+```bash
+export DATABASE_URL=postgresql+asyncpg://payments:payments@localhost:5432/payments
+export RABBITMQ_URL=amqp://payments:payments@localhost:5672/
+bash scripts/verify.sh
+```
+
+`verify.sh` прогоняет ruff, mypy, миграции и все тесты. Integration-тесты очищают таблицы `payments` и `outbox` в этой базе.

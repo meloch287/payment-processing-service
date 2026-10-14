@@ -79,3 +79,38 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: bash scripts/quickstart-check.sh
+
+  local-dev:
+    name: README local development
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql+asyncpg://payments:payments@localhost:5432/payments
+      RABBITMQ_URL: amqp://payments:payments@localhost:5672/
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait postgres rabbitmq
+      - run: uv sync
+      - run: env -u DATABASE_URL -u RABBITMQ_URL uv run alembic upgrade head
+      - name: api and consumer from README
+        run: |
+          env -u DATABASE_URL -u RABBITMQ_URL uv run uvicorn app.main:create_app --factory > api.log 2>&1 &
+          env -u DATABASE_URL -u RABBITMQ_URL uv run python -m app.consumer > consumer.log 2>&1 &
+          for _ in $(seq 1 60); do curl -fsS localhost:8000/health/ready -H "X-API-Key: change-me" && break; sleep 1; done
+          id=$(curl -fsS -X POST localhost:8000/api/v1/payments -H "X-API-Key: change-me" -H "Idempotency-Key: demo-1" \
+            -H "Content-Type: application/json" \
+            -d '{"amount": "100.00", "currency": "RUB", "description": "demo", "webhook_url": "https://example.com/"}' | jq -r .payment_id)
+          for _ in $(seq 1 30); do
+            status=$(curl -fsS "localhost:8000/api/v1/payments/$id" -H "X-API-Key: change-me" | jq -r .status)
+            [ "$status" != pending ] && break
+            sleep 1
+          done
+          echo "payment $id: $status"
+          cat api.log consumer.log | tail -20
+          [ "$status" = succeeded ] || [ "$status" = failed ]
+          pkill -f uvicorn
+          pkill -f app.consumer
+      - run: bash scripts/verify.sh
